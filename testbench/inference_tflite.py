@@ -1,9 +1,14 @@
+"""
+command to run:
+python testbench/inference_tflite.py \
+ -m ~/deit_proj/model_converter/models/tflite_models/fully_quant_from_onnx_deit_tiny_distilled_patch16_224.tflite
+"""
 import os
 import time
 import datetime
 import glob
 import argparse
-
+import json
 import tensorflow as tf
 import numpy as np
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
@@ -11,12 +16,7 @@ from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from loader import load_img_tensor, load_caffee_labels
 
 
-def eval_acc(
-    tflite_path,  # path to tfilte model
-    val_path,     # path to imagenet validation set
-    label_path, mean, std):
-
-    # GPU settings
+def set_gpus_strategy():
     gpus_list = tf.config.list_physical_devices('GPU')
     if gpus_list is not None:
         try:
@@ -30,7 +30,16 @@ def eval_acc(
             print(len(gpus_list), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
         except RuntimeError as e:
             print(e)
-        gpu_strategy = tf.distribute.MirroredStrategy(devices=tf.config.list_logical_devices('GPU'))
+    return tf.distribute.MirroredStrategy(devices=tf.config.list_logical_devices('GPU'))
+
+
+def eval_acc(
+    tflite_path,  # path to tfilte model
+    val_path,     # path to imagenet validation set
+    label_path, mean, std):
+    # Set gpu 
+    if(tf.test.is_gpu_available()):
+        gpu_strategy = set_gpus_strategy()
 
     # Load labels & dataset
     caffee_maps = load_caffee_labels(label_path) 
@@ -45,8 +54,6 @@ def eval_acc(
     if(input_details[0].get('dtype')==np.uint8):
         quant_scale = input_details[0]['quantization_parameters']['scales'][0]
         quant_zero_point = input_details[0]['quantization_parameters']['zero_points'][0]
-        print("scales: %f\n" %quant_scale)
-        print("zero points: %d\n" %quant_zero_point)
 
     with open("val_acc_%s"%os.path.split(tflite_path)[-1], 'a') as f:
         f.write("\n%s\n"%datetime.datetime.now())
@@ -79,7 +86,7 @@ def eval_acc(
             # Proccess result
             pred_class = np.argmax(output_data[0])
             prediction = caffee_maps.get(str(pred_class))[0]
-            ans = image_path.split("/")[-2]
+            ans = image_path.split("/")[-2]  # Folder named as caffee classes
             latency = stop_time - start_time
             latency_sum += latency
             if(prediction==ans):
@@ -116,11 +123,13 @@ def main():
         '-std', default=IMAGENET_DEFAULT_STD, help='Dataset standard deviation for normalization.')
     args = parser.parse_args()
 
-    eval_acc(tflite_path=args.model, 
-             val_path=args.dir, 
-             label_path=args.labels, 
-             mean=args.mean, 
-             std= args.std)
+    eval_acc(
+        tflite_path=args.model, 
+        val_path=args.dir, 
+        label_path=args.labels, 
+        mean=args.mean, 
+        std= args.std
+    )
 
 
 if __name__ == "__main__":
