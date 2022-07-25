@@ -1,28 +1,38 @@
 import glob
 import os
+import sys
+import random
+import argparse
 
+from PIL import Image
 import torch
+import torchvision
 import onnx
 import onnx_tf.backend 
 import tensorflow as tf
 import numpy as np
-
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 # Configs
 DEIT_MODELS = ('deit_tiny_patch16_224',
                'deit_tiny_distilled_patch16_224',
                'deit_base_patch16_384',
                'deit_base_distilled_patch16_384')
-MODEL_NAME = DEIT_MODELS[1]
+MODEL_NAME = DEIT_MODELS[0]
 RESOLUTION = 224
+
+VAL_PATH = os.path.abspath("/home/yysung/imagenet/val")
 ROOT_PATH = os.path.join(os.path.abspath(os.pardir), "deit_proj")
 ONNX_PATH = os.path.join(os.path.abspath(os.pardir), "deit_proj", "model_converter", "models", "onnx_models", "from_onnx_%s.onnx" %MODEL_NAME)
 TF_PATH = os.path.abspath(os.path.join(os.path.abspath(os.pardir), "deit_proj", "model_converter", "models", "tf_models", "from_onnx_%s" %MODEL_NAME))
 TFLITE_PATH = os.path.abspath(os.path.join(os.path.abspath(os.pardir), "deit_proj", "model_converter", "models", "tflite_models", "from_onnx_%s.tflite" %MODEL_NAME))
 
 
+
 def pt_to_onnx(pt_model:torch.nn.Module, onnx_path, resolution=224):
-    print("\n\nConverting the model from pytorch to onnx ...")
+    print("\n-----------------------------------------------")
+    print("| Converting the model from pytorch to onnx ... |")
+    print("-----------------------------------------------\n")
     dummy_input = torch.randn((1, 3, resolution, resolution))  # (N, C, H, W)
     torch.onnx.export(model = pt_model,
                       args = dummy_input,    # Give a random input to trace the structure              
@@ -31,7 +41,9 @@ def pt_to_onnx(pt_model:torch.nn.Module, onnx_path, resolution=224):
 
 
 def onnx_to_tf(onnx_path, tf_path):
-    print("\n\nConverting the model from onnx to tensorflow ...")
+    print("\n----------------------------------------------------")
+    print("| Converting the model from onnx to tensorflow ... |")
+    print("----------------------------------------------------\n")
 
     # where the representation of tensorflow model will be stored
     onnx_model = onnx.load(onnx_path)  # load onnx model
@@ -49,7 +61,10 @@ def onnx_to_tf(onnx_path, tf_path):
 
       
 def tf_to_tflite(tf_path, tflite_path):
-    print("\n\nConverting the model from tensorflow to tflite ...")
+    print("\n------------------------------------------------------")
+    print("| Converting the model from tensorflow to tflite ... |")
+    print("------------------------------------------------------\n")
+
     # Convert the model
     converter = tf.lite.TFLiteConverter.from_saved_model(tf_path)
     converter.target_spec.supported_ops = [
@@ -63,18 +78,99 @@ def tf_to_tflite(tf_path, tflite_path):
         f.write(tflite_model)
 
 
+def gen_representative_data():
+    calibration_times = 100
+    val_set = sorted(glob.glob(os.path.join(VAL_PATH, "*", "*.JPEG")))
+    img_set = []
+
+    for i in range(calibration_times):
+        img_path = random.choice(val_set)  # Select rep. data randomly
+        print(img_path)
+        img = Image.open(img_path).convert('RGB')
+        transform = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(RESOLUTION),
+            torchvision.transforms.CenterCrop(RESOLUTION), 
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)
+        ])
+        img_tensor = transform(img) 
+        img_set.append(img_tensor.numpy())
+
+    for steps, input_value in enumerate(tf.data.Dataset.from_tensor_slices(img_set).batch(1).take(calibration_times)):
+        print("calibrating %d" %(steps+1))
+        yield [input_value]
+
+
+def tf_to_quant_tflite(tf_path, tflite_path, fully_quant:bool):
+    print("\n-----------------------------------------------------------------------------------")
+    print("| Converting the model from tensorflow to tflite and FULLY QUANTIZING TO UINT8... |")
+    print("-----------------------------------------------------------------------------------\n")
+
+    # Convert the model
+    converter = tf.lite.TFLiteConverter.from_saved_model(tf_path)  # path to the SavedModel directory
+    converter.optimizations = [tf.lite.Optimize.DEFAULT] 
+
+    if fully_quant:
+        converter.target_spec.supported_ops = [
+            tf.lite.OpsSet.TFLITE_BUILTINS,  # enable TensorFlow Lite ops.
+            tf.lite.OpsSet.SELECT_TF_OPS,    # enable TensorFlow ops.
+            tf.lite.OpsSet.TFLITE_BUILTINS_INT8 
+        ]
+        converter._experimental_new_quantizer = True
+        converter.representative_dataset = gen_representative_data
+        converter.inference_input_type = tf.uint8  
+        converter.inference_output_type = tf.uint8 
+        tflite_path = tflite_path.replace(
+            "%s"%os.path.split(tflite_path)[-1],
+            'fully_quant_%s'%os.path.split(tflite_path)[-1]
+        )
+
+    else:  # Dynamic Qunatization
+        converter.target_spec.supported_ops = [
+            tf.lite.OpsSet.TFLITE_BUILTINS,  # enable TensorFlow Lite ops.
+            tf.lite.OpsSet.SELECT_TF_OPS     # enable TensorFlow ops. (e.g. Flex Delegates)
+        ]
+        tflite_path = tflite_path.replace(
+            "%s" %os.path.split(tflite_path)[-1],
+            'dynamic_quant_%s' %os.path.split(tflite_path)[-1]
+        )
+    
+    print("\nQuantizing Model...\n")
+    tflite_model = converter.convert()
+    tf.lite.experimental.Analyzer.analyze(model_content=tflite_model)
+
+    # Save the model.
+    with open(tflite_path, 'wb') as f:
+        f.write(tflite_model)
+    print("Quantize model to uint8 Successfully")
+    print("Model saved in : %s" %tflite_path)
+    
+
 def main():
     # Load the pytorch model from torchhub
     deit_FP32 = torch.hub.load('facebookresearch/deit:main',
                                 MODEL_NAME,
                                 pretrained = True)
-    deit_INT8 = torch.quantization.quantize_dynamic(deit_FP32, {torch.nn.Linear}, dtype=torch.qint8)
-    
-    # Convert the model
-    pt_to_onnx(pt_model=deit_FP32, onnx_path = ONNX_PATH, resolution=RESOLUTION)
-    onnx_to_tf(onnx_path = ONNX_PATH, tf_path = TF_PATH)
-    tf_to_tflite(tf_path=TF_PATH, tflite_path=TFLITE_PATH)
 
+    # Convert the model
+    # pt_to_onnx(
+    #     pt_model=deit_FP32,
+    #     onnx_path = ONNX_PATH,
+    #     resolution=RESOLUTION
+    # )
+    # onnx_to_tf(
+    #     onnx_path = ONNX_PATH,
+    #     tf_path = TF_PATH
+    # )
+    # tf_to_tflite(
+    #     tf_path=TF_PATH, 
+    #     tflite_path=TFLITE_PATH
+    # )
+    tf_to_quant_tflite(
+        tf_path=TF_PATH, 
+        tflite_path=TFLITE_PATH,
+        fully_quant=True
+    )
 
 if __name__ == "__main__":
     main()
