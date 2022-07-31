@@ -4,29 +4,15 @@ import sys
 import random
 import argparse
 
-from PIL import Image
 import torch
 import torchvision
 import onnx
 import onnx_tf.backend 
 import tensorflow as tf
+
 import numpy as np
+from PIL import Image
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-
-# Configs
-DEIT_MODELS = ('deit_tiny_patch16_224',
-               'deit_tiny_distilled_patch16_224',
-               'deit_base_patch16_384',
-               'deit_base_distilled_patch16_384')
-MODEL_NAME = DEIT_MODELS[0]
-RESOLUTION = 224
-
-VAL_PATH = os.path.abspath("/home/yysung/imagenet/val")
-ROOT_PATH = os.path.join(os.path.abspath(os.pardir), "deit_proj")
-ONNX_PATH = os.path.join(os.path.abspath(os.pardir), "deit_proj", "model_converter", "models", "onnx_models", "from_onnx_%s.onnx" %MODEL_NAME)
-TF_PATH = os.path.abspath(os.path.join(os.path.abspath(os.pardir), "deit_proj", "model_converter", "models", "tf_models", "from_onnx_%s" %MODEL_NAME))
-TFLITE_PATH = os.path.abspath(os.path.join(os.path.abspath(os.pardir), "deit_proj", "model_converter", "models", "tflite_models", "from_onnx_%s.tflite" %MODEL_NAME))
-
 
 
 def pt_to_onnx(pt_model:torch.nn.Module, onnx_path, resolution=224):
@@ -59,7 +45,7 @@ def onnx_to_tf(onnx_path, tf_path):
     # to a protobuf file.
     tf_rep.export_graph(tf_path)
 
-      
+
 def tf_to_tflite(tf_path, tflite_path):
     print("\n------------------------------------------------------")
     print("| Converting the model from tensorflow to tflite ... |")
@@ -79,8 +65,10 @@ def tf_to_tflite(tf_path, tflite_path):
 
 
 def gen_representative_data():
+    VAL_SETS_PATH = os.path.abspath("/home/yysung/imagenet/val")
+    RESOLUTION = 224
     calibration_times = 100
-    val_set = sorted(glob.glob(os.path.join(VAL_PATH, "*", "*.JPEG")))
+    val_set = sorted(glob.glob(os.path.join(VAL_SETS_PATH, "*", "*.JPEG")))
     img_set = []
 
     for i in range(calibration_times):
@@ -93,8 +81,8 @@ def gen_representative_data():
             torchvision.transforms.ToTensor(),
             torchvision.transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)
         ])
-        img_tensor = transform(img) 
-        img_set.append(img_tensor.numpy())
+        img_numpy = transform(img).numpy()
+        img_set.append(img_numpy)
 
     for steps, input_value in enumerate(tf.data.Dataset.from_tensor_slices(img_set).batch(1).take(calibration_times)):
         print("calibrating %d" %(steps+1))
@@ -120,19 +108,18 @@ def tf_to_quant_tflite(tf_path, tflite_path, fully_quant:bool):
         converter.representative_dataset = gen_representative_data
         converter.inference_input_type = tf.uint8  
         converter.inference_output_type = tf.uint8 
-        tflite_path = tflite_path.replace(
-            "%s"%os.path.split(tflite_path)[-1],
-            'fully_quant_%s'%os.path.split(tflite_path)[-1]
+        tflite_path = tflite_path.replace(   
+            "{}".format(os.path.split(tflite_path)[-1]), 
+            "fully_quant_{}".format(os.path.split(tflite_path)[-1])
         )
-
     else:  # Dynamic Qunatization
         converter.target_spec.supported_ops = [
             tf.lite.OpsSet.TFLITE_BUILTINS,  # enable TensorFlow Lite ops.
             tf.lite.OpsSet.SELECT_TF_OPS     # enable TensorFlow ops. (e.g. Flex Delegates)
         ]
-        tflite_path = tflite_path.replace(
-            "%s" %os.path.split(tflite_path)[-1],
-            'dynamic_quant_%s' %os.path.split(tflite_path)[-1]
+        tflite_path = tflite_path.replace(   
+            "{}".format(os.path.split(tflite_path)[-1]), 
+            "dynamic_quant_{}".format(os.path.split(tflite_path)[-1])
         )
     
     print("\nQuantizing Model...\n")
@@ -143,34 +130,49 @@ def tf_to_quant_tflite(tf_path, tflite_path, fully_quant:bool):
     with open(tflite_path, 'wb') as f:
         f.write(tflite_model)
     print("Quantize model to uint8 Successfully")
-    print("Model saved in : %s" %tflite_path)
+    print("Saved in: %s" %tflite_path)
     
 
 def main():
-    # Load the pytorch model from torchhub
+    # Model Configs
+    DEIT_MODELS = (
+        'deit_tiny_patch16_224',
+        'deit_tiny_distilled_patch16_224',
+        'deit_base_patch16_384',
+        'deit_base_distilled_patch16_384'
+    )
+    MODEL_NAME = DEIT_MODELS[0]
+    RESOLUTION = 224
+    
+    ONNX_PATH = os.path.abspath("model_converter/models/onnx_models/from_onnx_{}.onnx".format(MODEL_NAME))
+    TF_PATH = os.path.abspath("model_converter/models/tf_models/from_onnx_{}".format(MODEL_NAME))
+    TFLITE_PATH = os.path.abspath("model_converter/models/tflite_models/from_onnx_{}.tflite".format(MODEL_NAME))
+
+    # Load the deit-tiny model from torchhub
     deit_FP32 = torch.hub.load('facebookresearch/deit:main',
                                 MODEL_NAME,
-                                pretrained = True)
+                                pretrained=True)
 
     # Convert the model
-    # pt_to_onnx(
-    #     pt_model=deit_FP32,
-    #     onnx_path = ONNX_PATH,
-    #     resolution=RESOLUTION
-    # )
-    # onnx_to_tf(
-    #     onnx_path = ONNX_PATH,
-    #     tf_path = TF_PATH
-    # )
-    # tf_to_tflite(
-    #     tf_path=TF_PATH, 
-    #     tflite_path=TFLITE_PATH
-    # )
+    pt_to_onnx(
+        pt_model=deit_FP32,
+        onnx_path=ONNX_PATH,
+        resolution=RESOLUTION
+    )
+    onnx_to_tf(
+        onnx_path=ONNX_PATH,
+        tf_path=TF_PATH
+    )
+    tf_to_tflite(
+        tf_path=TF_PATH,
+        tflite_path=TFLITE_PATH
+    )
     tf_to_quant_tflite(
-        tf_path=TF_PATH, 
+        tf_path=TF_PATH,
         tflite_path=TFLITE_PATH,
         fully_quant=True
     )
+
 
 if __name__ == "__main__":
     main()
