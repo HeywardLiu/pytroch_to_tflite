@@ -163,3 +163,5 @@ cython_debug/
 testbench/imagenet_val
 testbench/test_img
 model_converter/models
+val_result
+val_result_onnxsim
