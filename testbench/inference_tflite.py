@@ -1,11 +1,8 @@
 """
-Usage
-
 1. Command To Run:
-python testbench/inference_tflite.py \
- -m ~/deit_proj/model_converter/models/tflite_models/fully_quant_from_onnx_deit_tiny_distilled_patch16_224.tflite
+python testbench/inference_tflite.py  -m ~/deit_proj/model_converter/models/tflite_models/uint8_cal100_trims_tiny_distilled_patch16_224.tflite
 
-2. Dataset should be structured as ImageNet:
+2. Dataset should be structured as ImageNet-style:
     main_directory/
     ...class_a/
     ......a_image_1.jpg
@@ -27,6 +24,7 @@ from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 from loader import load_img_tensor, load_caffee_labels
 
+
 def eval_acc(
     tflite_path,  # path to tfilte model
     dataset_path,     # path to imagenet validation set
@@ -38,7 +36,8 @@ def eval_acc(
 
     # Load the TFLite model & parameters
     interpreter = tf.lite.Interpreter(
-        model_path=tflite_path
+        model_path=tflite_path,
+        num_threads=4
     )
     interpreter.allocate_tensors()
     input_details = interpreter.get_input_details()
@@ -53,7 +52,6 @@ def eval_acc(
     else:
         channel_first = False
 
-
     # Check if the model is quantized     
     if(input_details[0].get('dtype')==np.uint8):
         quant_scale = input_details[0]['quantization_parameters']['scales'][0]
@@ -65,26 +63,25 @@ def eval_acc(
         f.write(str(input_details))
         f.write("--------------------------------\n")
 
-
     corrects = 0
     avg_latency = 0 
     for i, image_path in enumerate(image_path_set, 1):
         # Load nomalized (standaraized) image into nparray
         img_numpy = load_img_tensor(
-            img_path=image_path, 
-            mean=IMAGENET_DEFAULT_MEAN, 
-            std=IMAGENET_DEFAULT_STD
+            img_path=image_path,
+            resolution=224, 
+            mean=mean, 
+            std=std
         ).numpy()
 
-        # Quantization
+        # Quantize input tensor 
         if(input_details[0].get('dtype')==np.uint8):
             img_numpy = (img_numpy/quant_scale) + quant_zero_point  
             img_numpy = np.array(img_numpy, dtype=np.uint8)
 
-        # (N,C,H,W) --> (N,H,W,C) 
-        if(channel_first==False):   
+        # (N,C,H,W) -> (N,H,W,C) 
+        if(not channel_first):   
             img_numpy = np.transpose(img_numpy, (0, 2, 3, 1))
-
 
         # Inference
         interpreter.set_tensor(input_details[0]['index'], img_numpy)
@@ -114,7 +111,7 @@ def eval_acc(
         print("----------------------------------")
 
         # Write result to file
-        if((i+1)%500==0):
+        if(i%500==0):
             with open("val_acc_%s"%os.path.split(tflite_path)[-1], 'a') as f:
                 f.write("latency, acc: %f, %d/%d (%f)\n" %( (avg_latency*1000), corrects, i, (corrects*100)/i ))
 
@@ -125,7 +122,7 @@ def main():
     parser.add_argument(
         '-m', '--model', required=True, help='File path of .tflite file.')
     parser.add_argument(
-        '-d', '--dir', default="/home/yysung/imagenet/val", help='Path to directory of imageNet validation set.')
+        '-d', '--dataset', default="/home/yysung/imagenet/val", help='Path to directory of dataset.')
     parser.add_argument(
         '-l', '--labels', default="/home/heyward-lab/deit_proj/testbench/labels/imagenet_class_index.json", help='Path of labels file.')
     parser.add_argument(
@@ -136,7 +133,7 @@ def main():
 
     eval_acc(
         tflite_path=args.model, 
-        dataset_path=args.dir, 
+        dataset_path=args.dataset, 
         label_path=args.labels, 
         mean=args.mean, 
         std= args.std
